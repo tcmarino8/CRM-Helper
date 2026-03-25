@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>CRM Helper</title>
+  <script src="popup.js"></script>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 10px; }
+    .section { margin: 12px 0; padding: 10px; border: 1px solid #ddd; border-radius: 5px; }
+    .section-title { font-weight: bold; margin-bottom: 8px; }
+    input[type="file"], textarea, button { width: 100%; padding: 8px; margin: 5px 0; box-sizing: border-box; }
+    input[type="text"], select { width: 100%; padding: 8px; margin: 5px 0; box-sizing: border-box; }
+    textarea { height: 100px; font-family: monospace; }
+    button { background-color: #0a66c2; color: white; border: none; cursor: pointer; border-radius: 3px; }
+    button:hover { background-color: #094f96; }
+    .request { border: 1px solid #ccc; margin: 8px 0; padding: 8px; background: #f9f9f9; }
+    .request-title { font-weight: bold; color: #333; }
+    .request-details { font-size: 0.9em; color: #555; margin: 5px 0; }
+    .request-data { margin-top: 4px; font-size: 0.9em; }
+    .status { color: #666; font-size: 0.9em; margin: 5px 0; }
+    .search-results { border: 1px solid #ddd; border-radius: 5px; max-height: 160px; overflow-y: auto; margin-top: 6px; }
+    .search-result { padding: 8px; border-bottom: 1px solid #eee; cursor: pointer; }
+    .search-result:last-child { border-bottom: none; }
+    .search-result:hover { background: #f2f7fd; }
+    .search-result-name { font-weight: bold; }
+    .search-result-meta { font-size: 0.85em; color: #555; margin-top: 2px; }
+    .selected-company { background: #eef6ff; border: 1px solid #b9d7ff; border-radius: 5px; padding: 8px; margin-top: 6px; }
+  </style>
+</head>
+<body>
+  <h2>CRM Helper (Manual)</h2>
+
+  <div class="section">
+    <div class="section-title">LinkedIn URL (auto-filled)</div>
+    <input type="text" id="linkedinUrl" placeholder="https://www.linkedin.com/in/..." readonly />
+    <div id="urlStatus" class="status"></div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Profile Details</div>
+    <input type="text" id="name" placeholder="Name" />
+    <input type="text" id="headline" placeholder="Headline / Title" />
+    <input type="hidden" id="existingCompanyId" />
+    <input type="text" id="company" placeholder="Company (search imported companies or type a new one)" />
+    <div id="companyStatus" class="status">Type at least 2 letters to search imported companies.</div>
+    <div id="selectedCompany" class="selected-company" style="display: none;"></div>
+    <div id="companyResults" class="search-results" style="display: none;"></div>
+    <input type="text" id="location" placeholder="Location" />
+    <input type="text" id="dates" placeholder="Current role dates" />
+    <input type="text" id="email" placeholder="Email" />
+    <input type="text" id="phone" placeholder="Phone" />
+    <div class="section-title">Category</div>
+    <select id="category">
+      <option value="">Unspecified</option>
+      <option value="client">Client</option>
+      <option value="investor">Investor</option>
+    </select>
+    <div class="section-title">Message Direction</div>
+    <select id="direction">
+      <option value="sdr_to_prospect">SDR to Prospect (outbound)</option>
+      <option value="prospect_to_sdr">Prospect to SDR (inbound reply)</option>
+    </select>
+    <div class="section-title">Message</div>
+    <textarea id="message" placeholder="Paste the message here..."></textarea>
+    <button id="saveManualBtn">Save entry</button>
+  </div>
+
+  <div id="apiStatus" class="status"></div>
+
+  <h3>Captured Data</h3>
+  <div id="requests"></div>
+</body>
+</html>

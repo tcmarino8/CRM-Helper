@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SDR Outreach Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,600;0,9..40,700&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #0f0f12;
+      --surface: #18181c;
+      --border: #2a2a30;
+      --text: #e4e4e7;
+      --muted: #71717a;
+      --green: #22c55e;
+      --red: #ef4444;
+      --amber: #f59e0b;
+      --blue: #3b82f6;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: 'DM Sans', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 1.5rem;
+    }
+    h1 {
+      font-size: 1.5rem;
+      font-weight: 700;
+      margin: 0 0 0.25rem 0;
+    }
+    .subtitle {
+      color: var(--muted);
+      font-size: 0.875rem;
+      margin-bottom: 1.5rem;
+    }
+    .api-base {
+      font-size: 0.75rem;
+      color: var(--muted);
+      margin-bottom: 1rem;
+    }
+    .api-base input {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 0.35rem 0.5rem;
+      border-radius: 6px;
+      width: 280px;
+      font-family: inherit;
+    }
+    .error {
+      background: rgba(239, 68, 68, 0.15);
+      border: 1px solid var(--red);
+      color: #fca5a5;
+      padding: 0.75rem 1rem;
+      border-radius: 8px;
+      margin-bottom: 1rem;
+      font-size: 0.875rem;
+    }
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 1rem;
+    }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1.25rem;
+    }
+    .card h2 {
+      font-size: 1rem;
+      font-weight: 700;
+      margin: 0 0 1rem 0;
+      color: var(--text);
+      padding-bottom: 0.75rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .stat-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      padding: 0.35rem 0;
+      font-size: 0.875rem;
+    }
+    .stat-row .label { color: var(--muted); }
+    .stat-row .value {
+      font-weight: 700;
+      font-size: 1rem;
+    }
+    .stat-row .value.positive { color: var(--green); }
+    .stat-row .value.negative { color: var(--red); }
+    .stat-row .value.neutral { color: var(--amber); }
+    .stat-row .value.muted { color: var(--muted); }
+    .stat-row .value.sent { color: var(--blue); }
+    .loading { color: var(--muted); }
+    .footnote {
+      margin-top: 1.5rem;
+      font-size: 0.75rem;
+      color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+  <h1>SDR Outreach Dashboard</h1>
+  <p class="subtitle">Messages sent, positive / negative / no response, and average response time.</p>
+  <div class="api-base">
+    <label for="apiBase">API base URL:</label>
+    <input id="apiBase" type="text" value="http://127.0.0.1:8000" placeholder="http://127.0.0.1:8000" />
+  </div>
+  <div id="error" class="error" style="display: none;"></div>
+  <div id="sdrs" class="cards"></div>
+  <p class="footnote">Sentiment & content stats coming later. Data from Neo4j graph.</p>
+
+  <script>
+    const apiBaseInput = document.getElementById('apiBase');
+    const errorEl = document.getElementById('error');
+    const sdrsEl = document.getElementById('sdrs');
+
+    function showError(msg) {
+      errorEl.textContent = msg;
+      errorEl.style.display = 'block';
+    }
+    function clearError() {
+      errorEl.style.display = 'none';
+    }
+
+    function base() {
+      const v = apiBaseInput.value.trim();
+      return v ? v.replace(/\/$/, '') : 'http://127.0.0.1:8000';
+    }
+
+    async function loadSdrs() {
+      clearError();
+      sdrsEl.innerHTML = '<p class="loading">Loading SDRs…</p>';
+      try {
+        const r = await fetch(`${base()}/analytics/sdrs`);
+        if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+        const data = await r.json();
+        if (!data.sdrs || data.sdrs.length === 0) {
+          sdrsEl.innerHTML = '<p class="loading">No SDRs found. Send at least one message as an SDR to see stats.</p>';
+          return;
+        }
+        sdrsEl.innerHTML = '';
+        for (const sdr of data.sdrs) {
+          const card = document.createElement('div');
+          card.className = 'card';
+          card.innerHTML = `
+            <h2>${escapeHtml(sdr.name)}</h2>
+            <p class="loading">Loading stats…</p>
+          `;
+          sdrsEl.appendChild(card);
+          loadStats(sdr.sdr_id, sdr.name || sdr.sdr_id, card);
+        }
+      } catch (e) {
+        showError('Failed to load SDRs: ' + e.message);
+        sdrsEl.innerHTML = '';
+      }
+    }
+
+    async function loadStats(sdrId, displayName, card) {
+      try {
+        const r = await fetch(`${base()}/analytics/sdr/${encodeURIComponent(sdrId)}/stats`);
+        if (!r.ok) throw new Error(await r.text());
+        const s = await r.json();
+        const avg = s.avg_response_hours != null
+          ? (s.avg_response_hours < 24
+            ? `${s.avg_response_hours} h`
+            : `${(s.avg_response_hours / 24).toFixed(1)} days`)
+          : '—';
+        card.innerHTML = `
+          <h2>${escapeHtml(displayName)}</h2>
+          <div class="stat-row"><span class="label">Messages sent</span><span class="value sent">${s.messages_sent}</span></div>
+          <div class="stat-row"><span class="label">Positive responses</span><span class="value positive">${s.positive_responses}</span></div>
+          <div class="stat-row"><span class="label">Negative responses</span><span class="value negative">${s.negative_responses}</span></div>
+          <div class="stat-row"><span class="label">No response</span><span class="value neutral">${s.no_responses}</span></div>
+          <div class="stat-row"><span class="label">Avg. time to response</span><span class="value muted">${avg}</span></div>
+        `;
+      } catch (e) {
+        card.innerHTML = `<h2>${escapeHtml(displayName)}</h2><p class="loading">Error: ${escapeHtml(e.message)}</p>`;
+      }
+    }
+
+    function escapeHtml(s) {
+      const div = document.createElement('div');
+      div.textContent = s;
+      return div.innerHTML;
+    }
+
+    apiBaseInput.addEventListener('change', loadSdrs);
+    apiBaseInput.addEventListener('blur', loadSdrs);
+    loadSdrs();
+  </script>
+</body>
+</html>
