@@ -23,12 +23,30 @@ from pydantic import BaseModel
 
 load_dotenv()  # load .env if present
 
+
+def _cors_origins() -> list[str]:
+    raw_value = (os.getenv("CORS_ORIGINS") or "").strip()
+    if not raw_value:
+        return [
+            "http://127.0.0.1:8000",
+            "http://localhost:8000",
+            "chrome-extension://*",
+        ]
+
+    if raw_value == "*":
+        return ["*"]
+
+    return [origin.strip() for origin in raw_value.split(",") if origin.strip()]
+
+
+ALLOW_CREDENTIALS = _cors_origins() != ["*"]
+
 app = FastAPI(title="LinkedIn → Neo4j Outreach Intelligence API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_cors_origins(),
+    allow_credentials=ALLOW_CREDENTIALS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -83,6 +101,7 @@ async def root():
         "docs": "/docs",
         "dashboard": "/dashboard",
         "health": "/health",
+        "cors_origins": _cors_origins(),
     }
 
 
@@ -665,6 +684,144 @@ async def sdr_stats(sdr_id: str):
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     return out
+
+
+@app.get("/analytics/sdr/{sdr_id}/companies")
+async def sdr_company_reach(sdr_id: str, limit: int = 20):
+    """
+    Company reach for a specific SDR.
+    Size metric: distinct prospects reached at each company.
+    """
+    _require_driver()
+    cypher = """
+    MATCH (sdr:Person {id: $sdr_id})-[:SENT]->(out:Message)-[:RECEIVED]->(prospect:Person)
+    OPTIONAL MATCH (prospect)-[:WORKS_AT]->(company:Company)
+    WITH
+      coalesce(company.id, 'co:unknown') AS company_id,
+      coalesce(company.name, 'Unknown company') AS company_name,
+      count(DISTINCT prospect) AS prospects_reached,
+      count(out) AS messages_sent
+    RETURN company_id, company_name, prospects_reached, messages_sent
+    ORDER BY prospects_reached DESC, messages_sent DESC, company_name ASC
+    LIMIT $limit
+    """
+
+    params = {"sdr_id": sdr_id, "limit": max(1, min(limit, 50))}
+    try:
+        with driver.session() as session:
+            rows = [dict(record) for record in session.run(cypher, params)]
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return {"companies": rows}
+
+
+@app.get("/analytics/sdr/{sdr_id}/prospects")
+async def sdr_prospects(sdr_id: str, limit: int = 100):
+    """
+    Prospects contacted by an SDR, including company and simple message/reply counts.
+    """
+    _require_driver()
+    cypher = """
+    MATCH (sdr:Person {id: $sdr_id})-[:SENT]->(out:Message)-[:RECEIVED]->(prospect:Person)
+    OPTIONAL MATCH (prospect)-[:WORKS_AT]->(company:Company)
+    WITH sdr, prospect, company, count(out) AS messages_sent, max(out.timestamp) AS last_outbound_at
+    OPTIONAL MATCH (prospect)-[:SENT]->(reply:Message)-[:RECEIVED]->(sdr)
+    WITH prospect, company, messages_sent, last_outbound_at, count(reply) AS replies_received
+    RETURN
+      prospect.id AS prospect_id,
+      coalesce(prospect.name, prospect.id) AS prospect_name,
+      coalesce(company.id, 'co:unknown') AS company_id,
+      coalesce(company.name, 'Unknown company') AS company_name,
+      messages_sent,
+      replies_received,
+      last_outbound_at
+    ORDER BY last_outbound_at DESC, prospect_name ASC
+    LIMIT $limit
+    """
+
+    params = {"sdr_id": sdr_id, "limit": max(1, min(limit, 250))}
+    try:
+        with driver.session() as session:
+            rows = [dict(record) for record in session.run(cypher, params)]
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return {"prospects": rows}
+
+
+@app.get("/analytics/sdr/{sdr_id}/prospect/{prospect_id}/conversation")
+async def sdr_prospect_conversation(sdr_id: str, prospect_id: str, limit: int = 200):
+    """
+    Conversation timeline between one SDR and one prospect.
+    """
+    _require_driver()
+    cypher = """
+    MATCH (sender:Person)-[:SENT]->(m:Message)-[:RECEIVED]->(receiver:Person)
+    WHERE (sender.id = $sdr_id AND receiver.id = $prospect_id)
+       OR (sender.id = $prospect_id AND receiver.id = $sdr_id)
+    OPTIONAL MATCH (m)-[:PART_OF]->(conv:Conversation)
+    RETURN
+      m.id AS message_id,
+      m.text AS text,
+      m.timestamp AS timestamp,
+      m.platform AS platform,
+      m.is_reply AS is_reply,
+      sender.id AS sender_id,
+      coalesce(sender.name, sender.id) AS sender_name,
+      receiver.id AS receiver_id,
+      coalesce(receiver.name, receiver.id) AS receiver_name,
+      conv.id AS conversation_id
+    ORDER BY coalesce(m.timestamp, ''), message_id
+    LIMIT $limit
+    """
+
+    params = {
+        "sdr_id": sdr_id,
+        "prospect_id": prospect_id,
+        "limit": max(1, min(limit, 500)),
+    }
+    try:
+        with driver.session() as session:
+            rows = [dict(record) for record in session.run(cypher, params)]
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return {
+        "sdr_id": sdr_id,
+        "prospect_id": prospect_id,
+        "messages": rows,
+    }
+
+
+@app.get("/analytics/companies/reach")
+async def company_reach(limit: int = 50):
+    """
+    Global company reach for the dashboard visualization.
+    Size metric: distinct prospects reached at each company.
+    """
+    _require_driver()
+    cypher = """
+    MATCH (:Person)-[:SENT]->(out:Message)-[:RECEIVED]->(prospect:Person)
+    OPTIONAL MATCH (prospect)-[:WORKS_AT]->(company:Company)
+    WITH
+      coalesce(company.id, 'co:unknown') AS company_id,
+      coalesce(company.name, 'Unknown company') AS company_name,
+      count(DISTINCT prospect) AS prospects_reached,
+      count(out) AS messages_sent
+    RETURN company_id, company_name, prospects_reached, messages_sent
+    ORDER BY prospects_reached DESC, messages_sent DESC, company_name ASC
+    LIMIT $limit
+    """
+
+    params = {"limit": max(1, min(limit, 200))}
+    try:
+        with driver.session() as session:
+            rows = [dict(record) for record in session.run(cypher, params)]
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return {"companies": rows}
 
 
 # Serve dashboard static files (mount last so routes take precedence)

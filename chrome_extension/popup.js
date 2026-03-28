@@ -1,11 +1,15 @@
 // popup.js (manual entry with auto URL)
 
 document.addEventListener('DOMContentLoaded', function() {
-  const API_BASE = 'http://127.0.0.1:8000'; // align with dashboard default
-  const SDR_ID = 'sdr1';
-  const SDR_NAME = 'SDR1';
+  const DEFAULT_API_BASE = 'http://127.0.0.1:8000';
+  const DEFAULT_SDR_ID = 'sdr1';
+  const DEFAULT_SDR_NAME = 'SDR1';
   const SEARCH_DEBOUNCE_MS = 250;
 
+  const apiBaseInput = document.getElementById('apiBase');
+  const sdrIdInput = document.getElementById('sdrId');
+  const sdrNameInput = document.getElementById('sdrName');
+  const settingsStatus = document.getElementById('settingsStatus');
   const linkedinUrlInput = document.getElementById('linkedinUrl');
   const urlStatus = document.getElementById('urlStatus');
   const apiStatus = document.getElementById('apiStatus');
@@ -28,6 +32,9 @@ document.addEventListener('DOMContentLoaded', function() {
   let searchTimer = null;
 
   const formFields = {
+    apiBase: apiBaseInput,
+    sdrId: sdrIdInput,
+    sdrName: sdrNameInput,
     pageUrl: linkedinUrlInput,
     name: nameInput,
     headline: headlineInput,
@@ -45,6 +52,10 @@ document.addEventListener('DOMContentLoaded', function() {
   // Load draft from storage
   chrome.storage.local.get('crmhelperDraft', (res) => {
     const draft = res.crmhelperDraft || {};
+    if (!draft.apiBase) draft.apiBase = DEFAULT_API_BASE;
+    if (!draft.sdrId) draft.sdrId = DEFAULT_SDR_ID;
+    if (!draft.sdrName) draft.sdrName = DEFAULT_SDR_NAME;
+
     Object.entries(formFields).forEach(([key, input]) => {
       if (draft[key] !== undefined && draft[key] !== null) input.value = draft[key];
     });
@@ -60,6 +71,8 @@ document.addEventListener('DOMContentLoaded', function() {
       };
       renderSelectedCompany();
     }
+
+    updateSettingsStatus();
   });
 
   // Try to prefill the LinkedIn URL from the active tab
@@ -80,6 +93,9 @@ document.addEventListener('DOMContentLoaded', function() {
       headline: headlineInput.value.trim(),
       company: companyInput.value.trim(),
       existingCompanyId: existingCompanyIdInput.value.trim(),
+      apiBase: apiBaseInput.value.trim(),
+      sdrId: sdrIdInput.value.trim(),
+      sdrName: sdrNameInput.value.trim(),
       location: locationInput.value.trim(),
       currentRoleDates: datesInput.value.trim(),
       email: emailInput.value.trim(),
@@ -95,9 +111,14 @@ document.addEventListener('DOMContentLoaded', function() {
       .then(() => {
         chrome.runtime.sendMessage({ type: 'form_capture', data }, () => {
           alert('Saved');
-          chrome.storage.local.remove('crmhelperDraft');
+          const settingsDraft = {
+            apiBase: apiBaseInput.value.trim(),
+            sdrId: sdrIdInput.value.trim(),
+            sdrName: sdrNameInput.value.trim()
+          };
+          chrome.storage.local.set({ crmhelperDraft: settingsDraft });
           Object.entries(formFields).forEach(([key, input]) => {
-            if (key === 'pageUrl') return;
+            if (['apiBase', 'sdrId', 'sdrName', 'pageUrl'].includes(key)) return;
             input.value = '';
           });
           clearSelectedCompany(false);
@@ -128,6 +149,11 @@ document.addEventListener('DOMContentLoaded', function() {
 
   Object.values(formFields).forEach((input) => {
     input.addEventListener('input', saveDraft);
+  });
+
+  [apiBaseInput, sdrIdInput, sdrNameInput].forEach((input) => {
+    input.addEventListener('input', updateSettingsStatus);
+    input.addEventListener('blur', updateSettingsStatus);
   });
 
   companyInput.addEventListener('input', () => {
@@ -193,6 +219,29 @@ document.addEventListener('DOMContentLoaded', function() {
     return company ? 'co:' + company.toLowerCase().replace(/[^a-z0-9]+/g, '-') : 'co:unknown';
   }
 
+  function apiBase() {
+    const value = apiBaseInput.value.trim();
+    return (value || DEFAULT_API_BASE).replace(/\/$/, '');
+  }
+
+  function currentSdrId() {
+    return sdrIdInput.value.trim() || DEFAULT_SDR_ID;
+  }
+
+  function currentSdrName() {
+    return sdrNameInput.value.trim() || DEFAULT_SDR_NAME;
+  }
+
+  function updateSettingsStatus() {
+    settingsStatus.textContent = `Backend: ${apiBase()} | SDR: ${currentSdrName()} (${currentSdrId()})`;
+  }
+
+  function escapeHtml(value) {
+    const div = document.createElement('div');
+    div.textContent = value == null ? '' : String(value);
+    return div.innerHTML;
+  }
+
   function renderSearchResults(companies) {
     if (!companies || companies.length === 0) {
       companyResults.innerHTML = '';
@@ -256,8 +305,11 @@ document.addEventListener('DOMContentLoaded', function() {
 
   async function searchCompanies(query) {
     try {
-      const response = await fetch(`${API_BASE}/graph/companies/search?q=${encodeURIComponent(query)}`);
-      if (!response.ok) throw new Error(`search failed: ${response.status}`);
+      const response = await fetch(`${apiBase()}/graph/companies/search?q=${encodeURIComponent(query)}`);
+      if (!response.ok) {
+        const details = await response.text();
+        throw new Error(`search failed: ${response.status} ${details}`);
+      }
       const payload = await response.json();
       const companies = payload.companies || [];
       companyStatus.textContent = companies.length
@@ -272,16 +324,26 @@ document.addEventListener('DOMContentLoaded', function() {
   }
 
   async function pushToBackend(data) {
+    if (!data.apiBase) {
+      throw new Error('Backend URL is required.');
+    }
+    if (!data.sdrId) {
+      throw new Error('SDR ID is required.');
+    }
+    if (!data.sdrName) {
+      throw new Error('SDR name is required.');
+    }
+
     apiStatus.textContent = 'Sending to backend...';
     const receiverId = slugFromUrl(data.pageUrl);
     const convId = `conv-${receiverId}`;
     const msgId = `msg-${Date.now()}`;
 
     const outbound = data.direction !== 'prospect_to_sdr';
-    const senderId = outbound ? SDR_ID : receiverId;
-    const senderName = outbound ? SDR_NAME : (data.name || receiverId);
-    const recvId = outbound ? receiverId : SDR_ID;
-    const recvName = outbound ? (data.name || receiverId) : SDR_NAME;
+    const senderId = outbound ? data.sdrId : receiverId;
+    const senderName = outbound ? data.sdrName : (data.name || receiverId);
+    const recvId = outbound ? receiverId : data.sdrId;
+    const recvName = outbound ? (data.name || receiverId) : data.sdrName;
     const isReply = !outbound;
 
     // 1) Upsert Person + Company
@@ -314,12 +376,12 @@ document.addEventListener('DOMContentLoaded', function() {
     const headers = { 'Content-Type': 'application/json' };
 
     // Fire requests sequentially for clarity
-    const res1 = await fetch(`${API_BASE}/graph/test/person_company`, {
+    const res1 = await fetch(`${apiBase()}/graph/test/person_company`, {
       method: 'POST', headers, body: JSON.stringify(personBody)
     });
     if (!res1.ok) throw new Error(`person_company failed: ${res1.status}`);
 
-    const res2 = await fetch(`${API_BASE}/graph/test/message`, {
+    const res2 = await fetch(`${apiBase()}/graph/test/message`, {
       method: 'POST', headers, body: JSON.stringify(messageBody)
     });
     if (!res2.ok) throw new Error(`message failed: ${res2.status}`);

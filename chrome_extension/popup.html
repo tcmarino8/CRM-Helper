@@ -4,7 +4,14 @@
   <title>CRM Helper</title>
   <script src="popup.js"></script>
   <style>
-    body { font-family: Arial, sans-serif; margin: 10px; }
+    body {
+      font-family: Arial, sans-serif;
+      margin: 10px;
+      width: 400px;
+      min-height: 55vh;
+      max-height: 55vh;
+      overflow-y: auto;
+    }
     .section { margin: 12px 0; padding: 10px; border: 1px solid #ddd; border-radius: 5px; }
     .section-title { font-weight: bold; margin-bottom: 8px; }
     input[type="file"], textarea, button { width: 100%; padding: 8px; margin: 5px 0; box-sizing: border-box; }
@@ -28,6 +35,14 @@
 </head>
 <body>
   <h2>CRM Helper (Manual)</h2>
+
+  <div class="section">
+    <div class="section-title">Team Settings</div>
+    <input type="text" id="apiBase" placeholder="Backend URL, e.g. http://100.x.x.x:8000" />
+    <input type="text" id="sdrId" placeholder="Your SDR ID, e.g. tyler" />
+    <input type="text" id="sdrName" placeholder="Your display name" />
+    <div id="settingsStatus" class="status">Set these once on each teammate machine.</div>
+  </div>
 
   <div class="section">
     <div class="section-title">LinkedIn URL (auto-filled)</div>

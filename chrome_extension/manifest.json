@@ -9,7 +9,9 @@
     "https://linkedin.com/*",
     "https://*.linkedin.com/*",
     "http://localhost:8000/*",
-    "https://localhost:8000/*"
+    "https://localhost:8000/*",
+    "http://*/*",
+    "https://*/*"
   ],
   "background": { "service_worker": "background.js" },
   "action": { "default_popup": "popup.html" },
