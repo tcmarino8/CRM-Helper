@@ -15,6 +15,18 @@ CREATE INDEX person_name_index IF NOT EXISTS
 FOR (p:Person)
 ON (p.name);
 
+CREATE INDEX person_contact_email_index IF NOT EXISTS
+FOR (p:Person)
+ON (p.contact_email);
+
+CREATE INDEX person_outreach_status_index IF NOT EXISTS
+FOR (p:Person)
+ON (p.outreach_status);
+
+CREATE INDEX person_outreach_channel_index IF NOT EXISTS
+FOR (p:Person)
+ON (p.outreach_channel);
+
 CREATE INDEX company_name_index IF NOT EXISTS
 FOR (c:Company)
 ON (c.name);
@@ -60,6 +72,14 @@ MERGE (r:ResponseType {name: 'ghosted'});
 //   ON CREATE SET
 //     c.name = $company_name
 // MERGE (p)-[:WORKS_AT]->(c);
+
+// Additional Person properties used by imports/outreach tracking:
+// p.contact_email
+// p.outreach_status        -> 'not_reached' | 'reached_out'
+// p.outreach_channel       -> 'linkedin' | 'email'
+// p.outreach_source        -> 'manual-entry' | 'crypto_contacts_md' | other import source
+// p.imported_at
+// p.last_outreach_at
 
 
 

@@ -56,6 +56,12 @@ app.add_middleware(
 driver: Any = None
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CLIENTS_DIRECTORY_PATH = PROJECT_ROOT / "Clients Directory.md"
+DEFAULT_CRYPTO_CONTACTS_PATH = PROJECT_ROOT / "Crypto Contacts.md"
+EMAIL_PATTERN = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
+COMPANY_SUFFIX_PATTERN = re.compile(
+    r"\b(holdings?|group|global|inc|llc|lp|ltd|limited|bank|na|plc|corp|corporation)\b",
+    re.IGNORECASE,
+)
 
 
 @app.on_event("startup")
@@ -75,8 +81,15 @@ def startup_event() -> None:
         print("Neo4j not configured (missing NEO4J_* env vars); skipping driver init.")
         return
 
-    driver = GraphDatabase.driver(uri, auth=(user, password))
-    print("Neo4j driver initialized.")
+    try:
+        candidate_driver = GraphDatabase.driver(uri, auth=(user, password))
+        candidate_driver.verify_connectivity()
+        driver = candidate_driver
+        print("Neo4j driver initialized.")
+    except Exception as exc:
+        driver = None
+        print(f"Neo4j configuration failed: {exc}")
+        print("Check NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD and DNS/network access to Neo4j Aura.")
 
 
 @app.on_event("shutdown")
@@ -110,13 +123,27 @@ class TestPersonCompanyPayload(BaseModel):
     person_name: str
     person_headline: Optional[str] = None
     person_profile_url: Optional[str] = None
+    contact_email: Optional[str] = None
+    outreach_status: Optional[str] = None
+    outreach_channel: Optional[str] = None
+    outreach_source: Optional[str] = None
+    last_outreach_at: Optional[str] = None
     company_id: Optional[str] = None
     existing_company_id: Optional[str] = None
     company_name: Optional[str] = None
+    company_full_name: Optional[str] = None
+    company_website: Optional[str] = None
     category: Optional[str] = None  # e.g., "client" or "investor"
 
 
 class ClientsDirectoryImportPayload(BaseModel):
+    markdown_text: Optional[str] = None
+    file_path: Optional[str] = None
+    source_name: Optional[str] = None
+    limit: Optional[int] = None
+
+
+class CryptoContactsImportPayload(BaseModel):
     markdown_text: Optional[str] = None
     file_path: Optional[str] = None
     source_name: Optional[str] = None
@@ -138,13 +165,65 @@ def _strip_markdown_formatting(value: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def _normalize_email(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    normalized = value.strip().lower()
+    return normalized or None
+
+
 def _normalize_website(value: Optional[str]) -> Optional[str]:
     if not value:
         return None
     website = _strip_markdown_formatting(value).lower().strip()
     website = re.sub(r"^https?://", "", website)
+    website = re.sub(r"^www\.", "", website)
     website = website.rstrip("/")
     return website or None
+
+
+def _normalize_company_match_value(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    text = _strip_markdown_formatting(value).lower()
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text or None
+
+
+def _normalize_company_alias_value(value: Optional[str]) -> Optional[str]:
+    normalized = _normalize_company_match_value(value)
+    if not normalized:
+        return None
+    without_suffixes = COMPANY_SUFFIX_PATTERN.sub(" ", normalized)
+    without_suffixes = re.sub(r"\s+", " ", without_suffixes).strip()
+    return without_suffixes or normalized
+
+
+def _person_id_from_email(email: str) -> str:
+    return f"email:{email.lower()}"
+
+
+def _name_from_email(email: str) -> str:
+    local_part = email.split("@", 1)[0]
+    cleaned = re.sub(r"[._+-]+", " ", local_part).strip()
+    pieces = [piece for piece in cleaned.split() if piece]
+    if not pieces:
+        return email
+    return " ".join(piece.capitalize() for piece in pieces)
+
+
+def _extract_emails(value: Optional[str]) -> list[str]:
+    if not value:
+        return []
+    emails: list[str] = []
+    seen: set[str] = set()
+    for match in EMAIL_PATTERN.finditer(value.replace("<br>", " ")):
+        email = match.group(0).lower()
+        if email not in seen:
+            seen.add(email)
+            emails.append(email)
+    return emails
 
 
 def _company_id_from_website_or_name(website: Optional[str], name: Optional[str]) -> str:
@@ -162,6 +241,69 @@ def _asset_class_list(value: Optional[str]) -> list[str]:
     if not value:
         return []
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _set_unique_company_match(index: dict[str, Optional[dict[str, Any]]], key: Optional[str], company: dict[str, Any]) -> None:
+    if not key:
+        return
+    existing = index.get(key)
+    if existing is None and key in index:
+        return
+    if existing and existing["company_id"] != company["company_id"]:
+        index[key] = None
+        return
+    index[key] = company
+
+
+def _load_existing_company_indices(session: Any) -> tuple[dict[str, Optional[dict[str, Any]]], dict[str, Optional[dict[str, Any]]]]:
+    website_index: dict[str, Optional[dict[str, Any]]] = {}
+    name_index: dict[str, Optional[dict[str, Any]]] = {}
+    cypher = """
+    MATCH (c:Company)
+    RETURN c.id AS company_id,
+           c.name AS name,
+           c.full_name AS full_name,
+           c.website AS website
+    """
+
+    for record in session.run(cypher):
+        company = dict(record)
+        _set_unique_company_match(website_index, _normalize_website(company.get("website")), company)
+        for value in (company.get("name"), company.get("full_name")):
+            _set_unique_company_match(name_index, _normalize_company_match_value(value), company)
+            _set_unique_company_match(name_index, _normalize_company_alias_value(value), company)
+
+    return website_index, name_index
+
+
+def _resolve_existing_company(
+    company_name: Optional[str],
+    company_full_name: Optional[str],
+    website: Optional[str],
+    website_index: dict[str, Optional[dict[str, Any]]],
+    name_index: dict[str, Optional[dict[str, Any]]],
+) -> Optional[dict[str, Any]]:
+    normalized_website = _normalize_website(website)
+    if normalized_website:
+        company = website_index.get(normalized_website)
+        if company:
+            return company
+
+    candidate_names = [company_name, company_full_name]
+    for value in candidate_names:
+        normalized_name = _normalize_company_match_value(value)
+        if normalized_name:
+            company = name_index.get(normalized_name)
+            if company:
+                return company
+
+        alias_name = _normalize_company_alias_value(value)
+        if alias_name:
+            company = name_index.get(alias_name)
+            if company:
+                return company
+
+    return None
 
 
 def _parse_clients_directory_markdown(markdown_text: str, source_name: str) -> tuple[list[dict[str, Any]], list[str]]:
@@ -232,6 +374,68 @@ def _parse_clients_directory_markdown(markdown_text: str, source_name: str) -> t
     return companies, parse_errors
 
 
+def _parse_crypto_contacts_markdown(markdown_text: str, source_name: str) -> tuple[list[dict[str, Any]], list[str]]:
+    contacts: list[dict[str, Any]] = []
+    parse_errors: list[str] = []
+    header_cells: Optional[list[str]] = None
+    seen_emails: set[str] = set()
+
+    for index, raw_line in enumerate(markdown_text.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or not line.startswith("|"):
+            continue
+
+        cells = _parse_table_cells(line)
+        if all(set(cell) <= {"-", ":"} for cell in cells if cell):
+            continue
+
+        if header_cells is None:
+            header_cells = cells
+            continue
+
+        if len(cells) != len(header_cells):
+            parse_errors.append(f"Line {index}: expected {len(header_cells)} cells, got {len(cells)}")
+            continue
+
+        raw_row = {header_cells[pos]: cells[pos] for pos in range(len(header_cells))}
+        row = {header_cells[pos]: _strip_markdown_formatting(cells[pos]) for pos in range(len(header_cells))}
+        company_name = row.get("Firm") or row.get("Client")
+        company_full_name = row.get("Full Name") or company_name
+        website = _normalize_website(row.get("Website"))
+        contacts_value = raw_row.get("Contacts") or row.get("Contacts")
+        emails = _extract_emails(contacts_value)
+
+        if not company_name:
+            parse_errors.append(f"Line {index}: missing firm/company name")
+            continue
+        if not emails:
+            parse_errors.append(f"Line {index}: no contact emails found")
+            continue
+
+        for email in emails:
+            if email in seen_emails:
+                continue
+            seen_emails.add(email)
+            contacts.append(
+                {
+                    "person_id": _person_id_from_email(email),
+                    "person_name": _name_from_email(email),
+                    "contact_email": email,
+                    "company_name": company_name,
+                    "company_full_name": company_full_name,
+                    "company_website": website,
+                    "trading_focus": row.get("Trading Focus"),
+                    "source_file": source_name,
+                    "row_number": row.get("#") or str(index),
+                    "outreach_status": "not_reached",
+                    "outreach_channel": "email",
+                    "outreach_source": "crypto_contacts_md",
+                }
+            )
+
+    return contacts, parse_errors
+
+
 def _duplicate_values(values: list[Optional[str]]) -> list[str]:
     counts: dict[str, int] = {}
     for value in values:
@@ -270,6 +474,19 @@ def _load_clients_directory_source(payload: ClientsDirectoryImportPayload) -> tu
         candidate = PROJECT_ROOT / candidate
     if not candidate.exists():
         raise HTTPException(status_code=404, detail=f"Clients directory file not found: {candidate}")
+
+    return candidate.read_text(encoding="utf-8"), payload.source_name or candidate.name
+
+
+def _load_crypto_contacts_source(payload: CryptoContactsImportPayload) -> tuple[str, str]:
+    if payload.markdown_text:
+        return payload.markdown_text, payload.source_name or "inline_crypto_contacts"
+
+    candidate = Path(payload.file_path) if payload.file_path else DEFAULT_CRYPTO_CONTACTS_PATH
+    if not candidate.is_absolute():
+        candidate = PROJECT_ROOT / candidate
+    if not candidate.exists():
+        raise HTTPException(status_code=404, detail=f"Crypto contacts file not found: {candidate}")
 
     return candidate.read_text(encoding="utf-8"), payload.source_name or candidate.name
 
@@ -314,15 +531,33 @@ async def create_test_person_company(payload: TestPersonCompanyPayload):
                 p.name = $person_name,
                 p.headline = $person_headline,
                 p.profile_url = $person_profile_url,
-                p.category = $category
+                p.category = $category,
+                p.contact_email = $contact_email,
+                p.outreach_status = coalesce($outreach_status, 'not_reached'),
+                p.outreach_channel = $outreach_channel,
+                p.outreach_source = $outreach_source,
+                p.last_outreach_at = $last_outreach_at,
+                p.imported_at = coalesce($last_outreach_at, datetime())
             ON MATCH SET
-                p.category = coalesce($category, p.category)
+                p.name = coalesce(p.name, $person_name),
+                p.headline = coalesce(p.headline, $person_headline),
+                p.profile_url = coalesce(p.profile_url, $person_profile_url),
+                p.contact_email = coalesce(p.contact_email, $contact_email),
+                p.category = coalesce($category, p.category),
+                p.outreach_status = coalesce($outreach_status, p.outreach_status, 'not_reached'),
+                p.outreach_channel = coalesce($outreach_channel, p.outreach_channel),
+                p.outreach_source = coalesce($outreach_source, p.outreach_source),
+                p.last_outreach_at = coalesce($last_outreach_at, p.last_outreach_at)
         MERGE (c:Company {id: $company_id})
             ON CREATE SET
                 c.name = $company_name,
+                c.full_name = $company_full_name,
+                c.website = $company_website,
                 c.category = $category
             ON MATCH SET
                 c.name = coalesce(c.name, $company_name),
+                c.full_name = coalesce(c.full_name, $company_full_name),
+                c.website = coalesce(c.website, $company_website),
                 c.category = coalesce(c.category, $category)
     MERGE (p)-[:WORKS_AT]->(c)
     RETURN p, c
@@ -421,6 +656,119 @@ async def import_clients_directory(payload: ClientsDirectoryImportPayload):
     }
 
 
+@app.post("/graph/import/crypto_contacts")
+async def import_crypto_contacts(payload: CryptoContactsImportPayload):
+    _require_driver()
+
+    markdown_text, source_name = _load_crypto_contacts_source(payload)
+    contacts, parse_errors = _parse_crypto_contacts_markdown(markdown_text, source_name)
+
+    if payload.limit is not None:
+        contacts = contacts[: payload.limit]
+
+    if not contacts:
+        return {
+            "message": "No crypto contacts parsed from markdown source.",
+            "source_name": source_name,
+            "contacts_imported": 0,
+            "people_created": 0,
+            "people_updated": 0,
+            "companies_created": 0,
+            "matched_existing_companies": 0,
+            "relationships_created": 0,
+            "skipped_rows": len(parse_errors),
+            "parse_errors": parse_errors,
+        }
+
+    now = datetime.now(timezone.utc).isoformat()
+    with driver.session() as session:
+        website_index, name_index = _load_existing_company_indices(session)
+
+    matched_existing_company_ids: set[str] = set()
+    unresolved_company_ids: set[str] = set()
+    for contact in contacts:
+        existing_company = _resolve_existing_company(
+            contact.get("company_name"),
+            contact.get("company_full_name"),
+            contact.get("company_website"),
+            website_index,
+            name_index,
+        )
+        if existing_company:
+            contact["company_id"] = existing_company["company_id"]
+            matched_existing_company_ids.add(existing_company["company_id"])
+        else:
+            company_id = _company_id_from_website_or_name(contact.get("company_website"), contact.get("company_name"))
+            contact["company_id"] = company_id
+            unresolved_company_ids.add(company_id)
+
+    cypher = """
+    UNWIND $contacts AS row
+    MERGE (c:Company {id: row.company_id})
+      ON CREATE SET
+        c.name = row.company_name,
+        c.full_name = row.company_full_name,
+        c.website = row.company_website,
+        c.crypto_trading_focus = row.trading_focus,
+        c.import_source = 'crypto_contacts_md',
+        c.source_file = row.source_file,
+        c.imported_at = $now,
+        c.created_at = $now
+      ON MATCH SET
+        c.name = coalesce(c.name, row.company_name),
+        c.full_name = coalesce(c.full_name, row.company_full_name),
+        c.website = coalesce(c.website, row.company_website),
+        c.crypto_trading_focus = coalesce(c.crypto_trading_focus, row.trading_focus),
+        c.source_file = coalesce(c.source_file, row.source_file),
+        c.updated_at = $now
+    MERGE (p:Person {id: row.person_id})
+      ON CREATE SET
+        p.name = row.person_name,
+        p.contact_email = row.contact_email,
+        p.outreach_status = row.outreach_status,
+        p.outreach_channel = row.outreach_channel,
+        p.outreach_source = row.outreach_source,
+        p.imported_at = $now,
+        p.created_at = $now,
+        p._just_created = true
+      ON MATCH SET
+        p.name = coalesce(p.name, row.person_name),
+        p.contact_email = coalesce(p.contact_email, row.contact_email),
+        p.outreach_status = coalesce(p.outreach_status, row.outreach_status),
+        p.outreach_channel = coalesce(p.outreach_channel, row.outreach_channel),
+        p.outreach_source = coalesce(p.outreach_source, row.outreach_source),
+        p.updated_at = $now
+    MERGE (p)-[works:WORKS_AT]->(c)
+      ON CREATE SET works.created_at = $now
+    RETURN count(DISTINCT p) AS processed_people
+    """
+
+    try:
+        with driver.session() as session:
+            result = session.run(cypher, {"contacts": contacts, "now": now})
+            record = result.single()
+            summary = result.consume()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Crypto contacts import failed: {exc}") from exc
+
+    counters = summary.counters
+    companies_created = min(len(unresolved_company_ids), counters.nodes_created)
+    people_created = max(counters.nodes_created - companies_created, 0)
+
+    return {
+        "message": f"Imported {len(contacts)} crypto contacts from markdown source.",
+        "source_name": source_name,
+        "contacts_imported": len(contacts),
+        "people_created": people_created,
+        "people_updated": max((record["processed_people"] if record else len(contacts)) - people_created, 0),
+        "companies_created": companies_created,
+        "matched_existing_companies": len(matched_existing_company_ids),
+        "relationships_created": counters.relationships_created,
+        "skipped_rows": len(parse_errors),
+        "parse_errors": parse_errors,
+    }
+
+
 @app.get("/graph/companies/search")
 async def search_companies(q: str, limit: int = 8):
     _require_driver()
@@ -514,6 +862,21 @@ async def create_test_message(payload: TestMessagePayload):
                 CREATE (m)-[:HAS_TYPE]->(rt)
                 """
                 session.run(link_cypher, {"message_id": record["message_id"], "response_type": response_type})
+            prospect_id = payload.sender_id if payload.is_reply else payload.receiver_id
+            session.run(
+                """
+                MATCH (p:Person {id: $prospect_id})
+                SET p.outreach_status = 'reached_out',
+                    p.outreach_channel = coalesce($platform, p.outreach_channel),
+                    p.last_outreach_at = coalesce($timestamp, p.last_outreach_at),
+                    p.updated_at = datetime()
+                """,
+                {
+                    "prospect_id": prospect_id,
+                    "platform": payload.platform,
+                    "timestamp": params["timestamp"],
+                },
+            )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Neo4j write failed: {exc}") from exc
 
@@ -574,7 +937,10 @@ def _require_driver():
     if driver is None:
         raise HTTPException(
             status_code=503,
-            detail="Neo4j driver not initialized.",
+            detail=(
+                "Neo4j driver not initialized. "
+                "Verify NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD and that the Neo4j host resolves from this machine."
+            ),
         )
 
 
@@ -811,6 +1177,104 @@ async def company_reach(limit: int = 50):
       count(out) AS messages_sent
     RETURN company_id, company_name, prospects_reached, messages_sent
     ORDER BY prospects_reached DESC, messages_sent DESC, company_name ASC
+    LIMIT $limit
+    """
+
+    params = {"limit": max(1, min(limit, 200))}
+    try:
+        with driver.session() as session:
+            rows = [dict(record) for record in session.run(cypher, params)]
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return {"companies": rows}
+
+
+@app.get("/graph/prospects/unreached")
+async def list_unreached_prospects(source: Optional[str] = None, limit: int = 50):
+    _require_driver()
+    cypher = """
+    MATCH (p:Person)-[:WORKS_AT]->(c:Company)
+    WHERE coalesce(p.outreach_status, 'not_reached') = 'not_reached'
+      AND ($source IS NULL OR p.outreach_source = $source)
+    RETURN p.id AS person_id,
+           p.name AS person_name,
+           p.contact_email AS contact_email,
+           p.outreach_channel AS outreach_channel,
+           p.outreach_source AS outreach_source,
+           c.id AS company_id,
+           c.name AS company_name
+    ORDER BY company_name, person_name
+    LIMIT $limit
+    """
+
+    params = {"source": source, "limit": max(1, min(limit, 500))}
+    try:
+        with driver.session() as session:
+            rows = [dict(record) for record in session.run(cypher, params)]
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return {"prospects": rows}
+
+
+@app.get("/graph/prospects")
+async def list_prospects(status: str = "all", source: Optional[str] = None, limit: int = 200):
+    """
+    List prospects for dashboard cards with optional outreach status filtering.
+    status: all | reached_out | not_reached
+    """
+    _require_driver()
+    normalized_status = (status or "all").strip().lower()
+    if normalized_status not in {"all", "reached_out", "not_reached"}:
+        raise HTTPException(status_code=400, detail="status must be one of: all, reached_out, not_reached")
+
+    cypher = """
+    MATCH (p:Person)-[:WORKS_AT]->(c:Company)
+    WITH p, c, coalesce(p.outreach_status, 'not_reached') AS outreach_status
+    WHERE ($status = 'all' OR outreach_status = $status)
+      AND ($source IS NULL OR p.outreach_source = $source)
+    RETURN p.id AS person_id,
+           coalesce(p.name, p.id) AS person_name,
+           p.contact_email AS contact_email,
+           outreach_status AS outreach_status,
+           p.outreach_channel AS outreach_channel,
+           p.outreach_source AS outreach_source,
+           p.last_outreach_at AS last_outreach_at,
+           c.id AS company_id,
+           c.name AS company_name
+    ORDER BY company_name, person_name
+    LIMIT $limit
+    """
+
+    params = {
+        "status": normalized_status,
+        "source": source,
+        "limit": max(1, min(limit, 1000)),
+    }
+    try:
+        with driver.session() as session:
+            rows = [dict(record) for record in session.run(cypher, params)]
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return {"prospects": rows}
+
+
+@app.get("/analytics/companies/reachable")
+async def company_reachable(limit: int = 50):
+    """
+    Company bubble sizing for people we can still reach out to.
+    Size metric: count of not_reached people linked to each company.
+    """
+    _require_driver()
+    cypher = """
+    MATCH (p:Person)-[:WORKS_AT]->(c:Company)
+    WHERE coalesce(p.outreach_status, 'not_reached') = 'not_reached'
+    RETURN c.id AS company_id,
+           coalesce(c.name, 'Unknown company') AS company_name,
+           count(p) AS reachable_people
+    ORDER BY reachable_people DESC, company_name ASC
     LIMIT $limit
     """
 

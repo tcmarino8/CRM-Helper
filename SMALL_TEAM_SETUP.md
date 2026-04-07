@@ -54,7 +54,38 @@ Invoke-WebRequest -UseBasicParsing -Method Post -Uri http://127.0.0.1:8000/graph
 
 If you are using a shared public URL, replace `127.0.0.1:8000` with that URL.
 
-## 4. SDR Setup
+## 4. Import Crypto Contacts
+
+Use the reusable crypto-contact import whenever `Crypto Contacts.md` gets new rows.
+
+One-time / ad hoc import via API:
+
+```powershell
+Invoke-WebRequest -UseBasicParsing -Method Post -Uri http://127.0.0.1:8000/graph/import/crypto_contacts -ContentType 'application/json' -Body '{}'
+```
+
+Reusable wrapper script:
+
+```powershell
+.\import_crypto_contacts.ps1
+```
+
+Optional arguments:
+
+```powershell
+.\import_crypto_contacts.ps1 -ApiBase http://127.0.0.1:8000 -FilePath "Crypto Contacts.md" -Limit 25
+```
+
+Import behavior:
+
+- reuses existing Company nodes when website or normalized company name matches
+- links imported people to the resolved company with `WORKS_AT`
+- creates email-based person records from contact emails
+- marks newly imported contacts as `not_reached`
+- defaults imported outreach channel to `email`
+- can be rerun safely as the markdown file grows
+
+## 5. SDR Setup
 
 Each SDR should:
 
@@ -73,9 +104,16 @@ Then they can:
 - search imported companies
 - attach LinkedIn contacts to shared Company nodes
 - save outreach records
+- save outreach from non-LinkedIn tabs as `email` automatically
 - open the shared dashboard URL in Chrome
 
-## 5. Dashboard
+Channel behavior in the popup:
+
+- if the current tab URL contains `linkedin`, outreach is stored as `linkedin`
+- otherwise outreach is stored as `email`
+- for email outreach, the contact email is used as the person identifier
+
+## 6. Dashboard
 
 Share this URL with the team:
 
@@ -83,7 +121,7 @@ Share this URL with the team:
 
 or your tunnel URL equivalent.
 
-## 6. Recommended Pilot
+## 7. Recommended Pilot
 
 1. Set this up for yourself first
 2. Test with one colleague

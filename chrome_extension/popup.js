@@ -11,6 +11,7 @@ document.addEventListener('DOMContentLoaded', function() {
   const sdrNameInput = document.getElementById('sdrName');
   const settingsStatus = document.getElementById('settingsStatus');
   const linkedinUrlInput = document.getElementById('linkedinUrl');
+  const outreachChannelInput = document.getElementById('outreachChannel');
   const urlStatus = document.getElementById('urlStatus');
   const apiStatus = document.getElementById('apiStatus');
   const nameInput = document.getElementById('name');
@@ -72,6 +73,7 @@ document.addEventListener('DOMContentLoaded', function() {
       renderSelectedCompany();
     }
 
+    updateOutreachChannel();
     updateSettingsStatus();
   });
 
@@ -81,10 +83,14 @@ document.addEventListener('DOMContentLoaded', function() {
       linkedinUrlInput.value = tabs[0].url;
       urlStatus.textContent = 'URL auto-filled from active tab';
     } else {
+      linkedinUrlInput.value = tabs && tabs.length && tabs[0].url ? tabs[0].url : '';
       urlStatus.textContent = 'Not on LinkedIn tab. You can paste a URL if needed.';
       linkedinUrlInput.removeAttribute('readonly');
     }
+    updateOutreachChannel();
   });
+
+  linkedinUrlInput.addEventListener('input', updateOutreachChannel);
 
   saveBtn.addEventListener('click', () => {
     const data = {
@@ -103,6 +109,7 @@ document.addEventListener('DOMContentLoaded', function() {
       category: categorySelect.value,
       direction: directionSelect.value,
       message: messageInput.value.trim(),
+      outreachChannel: inferOutreachChannel(linkedinUrlInput.value.trim()),
       source: 'manual-entry'
     };
 
@@ -217,6 +224,25 @@ document.addEventListener('DOMContentLoaded', function() {
 
   function companyId(company) {
     return company ? 'co:' + company.toLowerCase().replace(/[^a-z0-9]+/g, '-') : 'co:unknown';
+  }
+
+  function inferOutreachChannel(url) {
+    return String(url || '').toLowerCase().includes('linkedin') ? 'linkedin' : 'email';
+  }
+
+  function updateOutreachChannel() {
+    outreachChannelInput.value = inferOutreachChannel(linkedinUrlInput.value.trim());
+  }
+
+  function personIdFromData(data) {
+    if (data.outreachChannel === 'email') {
+      const email = data.email.trim().toLowerCase();
+      if (!email) {
+        throw new Error('Email is required for email outreach.');
+      }
+      return `email:${email}`;
+    }
+    return slugFromUrl(data.pageUrl);
   }
 
   function apiBase() {
@@ -335,7 +361,7 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     apiStatus.textContent = 'Sending to backend...';
-    const receiverId = slugFromUrl(data.pageUrl);
+  const receiverId = personIdFromData(data);
     const convId = `conv-${receiverId}`;
     const msgId = `msg-${Date.now()}`;
 
@@ -345,16 +371,24 @@ document.addEventListener('DOMContentLoaded', function() {
     const recvId = outbound ? receiverId : data.sdrId;
     const recvName = outbound ? (data.name || receiverId) : data.sdrName;
     const isReply = !outbound;
+    const lastOutreachAt = new Date().toISOString();
 
     // 1) Upsert Person + Company
     const personBody = {
       person_id: receiverId,
       person_name: data.name || receiverId,
       person_headline: data.headline || null,
-      person_profile_url: data.pageUrl || null,
+      person_profile_url: data.outreachChannel === 'linkedin' ? (data.pageUrl || null) : null,
+      contact_email: data.email || null,
+      outreach_status: 'reached',
+      outreach_channel: data.outreachChannel,
+      outreach_source: data.source,
+      last_outreach_at: lastOutreachAt,
       company_id: data.existingCompanyId ? null : companyId(data.company),
       existing_company_id: data.existingCompanyId || null,
       company_name: data.company || 'Unknown',
+      company_website: selectedCompany ? (selectedCompany.website || null) : null,
+      company_full_name: selectedCompany ? (selectedCompany.full_name || selectedCompany.name || null) : null,
       category: data.category || null
     };
 
@@ -365,8 +399,8 @@ document.addEventListener('DOMContentLoaded', function() {
       sender_id: senderId,
       receiver_id: recvId,
       text: data.message || '',
-      timestamp: new Date().toISOString(),
-      platform: 'linkedin',
+      timestamp: lastOutreachAt,
+      platform: data.outreachChannel,
       is_reply: isReply,
       sender_name: senderName,
       receiver_name: recvName,

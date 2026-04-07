@@ -113,6 +113,27 @@
       display: flex;
       gap: 0.5rem;
     }
+    .toggle-row {
+      display: flex;
+      gap: 0.5rem;
+      margin-bottom: 1rem;
+      flex-wrap: wrap;
+    }
+    .toggle-btn {
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: #1a1a21;
+      color: var(--text);
+      padding: 0.45rem 0.8rem;
+      font-size: 0.78rem;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .toggle-btn.active {
+      background: rgba(59, 130, 246, 0.2);
+      border-color: #3b82f6;
+      color: #dbeafe;
+    }
     .btn {
       border: 1px solid var(--border);
       border-radius: 8px;
@@ -159,11 +180,42 @@
       grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
       gap: 0.75rem;
     }
+    .prospect-cards-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+      gap: 0.8rem;
+    }
     .flowbite-like-card {
       background: var(--surface);
       border: 1px solid var(--border);
       border-radius: 10px;
       padding: 0.9rem;
+    }
+    .status-pill {
+      display: inline-block;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 0.18rem 0.5rem;
+      font-size: 0.7rem;
+      margin-bottom: 0.5rem;
+      color: var(--muted);
+    }
+    .status-pill.reached {
+      color: #86efac;
+      border-color: rgba(34, 197, 94, 0.5);
+      background: rgba(34, 197, 94, 0.1);
+    }
+    .status-pill.not-reached {
+      color: #fef08a;
+      border-color: rgba(245, 158, 11, 0.5);
+      background: rgba(245, 158, 11, 0.12);
+    }
+    .person-card-meta {
+      color: var(--muted);
+      font-size: 0.78rem;
+      line-height: 1.4;
+      margin-top: 0.3rem;
+      margin-bottom: 0.75rem;
     }
     .prospect-title {
       margin: 0 0 0.35rem 0;
@@ -286,8 +338,16 @@
 
   <div id="conversationPanel" class="panel" style="display: none;"></div>
 
-  <h2 class="section-title">Company Reach Visualization</h2>
-  <p class="section-subtitle">Bubble size reflects how many distinct prospects have been reached at each company.</p>
+  <h2 class="section-title">Prospect Outreach Board</h2>
+  <p class="section-subtitle">Toggle reached vs not reached and review all people as cards.</p>
+  <div class="toggle-row">
+    <button class="toggle-btn active" data-action="toggle-outreach" data-status="not_reached">Not Reached Out To</button>
+    <button class="toggle-btn" data-action="toggle-outreach" data-status="reached_out">Reached Out To</button>
+  </div>
+  <div id="prospectCards" class="prospect-cards-grid"></div>
+
+  <h2 class="section-title">Reachable Companies</h2>
+  <p class="section-subtitle">Bubble size reflects how many people you can still reach out to at each company.</p>
   <div id="companies" class="companies-wrap">
     <p class="loading">Loading companies…</p>
   </div>
@@ -300,6 +360,8 @@
     const sdrsEl = document.getElementById('sdrs');
     const companiesEl = document.getElementById('companies');
     const conversationPanelEl = document.getElementById('conversationPanel');
+    const prospectCardsEl = document.getElementById('prospectCards');
+    let outreachFilter = 'not_reached';
 
     function showError(msg) {
       errorEl.textContent = msg;
@@ -371,22 +433,21 @@
     async function loadCompanyReach() {
       companiesEl.innerHTML = '<p class="loading">Loading companies…</p>';
       try {
-        const r = await fetch(`${base()}/analytics/companies/reach?limit=40`);
+        const r = await fetch(`${base()}/analytics/companies/reachable?limit=50`);
         if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
         const data = await r.json();
         const companies = Array.isArray(data.companies) ? data.companies : [];
         if (companies.length === 0) {
-          companiesEl.innerHTML = '<p class="loading">No company reach data yet.</p>';
+          companiesEl.innerHTML = '<p class="loading">No reachable-company data yet.</p>';
           return;
         }
 
-        const maxReach = Math.max(...companies.map(c => Number(c.prospects_reached || 0)), 1);
+        const maxReach = Math.max(...companies.map(c => Number(c.reachable_people || 0)), 1);
         const zone = document.createElement('div');
         zone.className = 'bubble-zone';
 
         for (const company of companies) {
-          const reach = Number(company.prospects_reached || 0);
-          const messages = Number(company.messages_sent || 0);
+          const reach = Number(company.reachable_people || 0);
           const scale = Math.sqrt(reach / maxReach);
           const size = Math.max(72, Math.round(72 + scale * 88));
 
@@ -396,8 +457,7 @@
           bubble.style.height = `${size}px`;
           bubble.innerHTML = `
             <div class="company-name" title="${escapeHtml(company.company_name || 'Unknown company')}">${escapeHtml(company.company_name || 'Unknown company')}</div>
-            <div class="company-size">${reach} reached</div>
-            <div class="company-size">${messages} msgs</div>
+            <div class="company-size">${reach} can reach out</div>
           `;
           zone.appendChild(bubble);
         }
@@ -406,6 +466,42 @@
         companiesEl.appendChild(zone);
       } catch (e) {
         companiesEl.innerHTML = `<p class="loading">Failed to load company reach: ${escapeHtml(e.message)}</p>`;
+      }
+    }
+
+    async function loadProspectCards() {
+      prospectCardsEl.innerHTML = '<p class="loading">Loading people…</p>';
+      try {
+        const r = await fetch(`${base()}/graph/prospects?status=${encodeURIComponent(outreachFilter)}&limit=500`);
+        if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+        const data = await r.json();
+        const prospects = Array.isArray(data.prospects) ? data.prospects : [];
+        if (prospects.length === 0) {
+          const label = outreachFilter === 'reached_out' ? 'reached out' : 'not reached out';
+          prospectCardsEl.innerHTML = `<p class="loading">No people found for ${label}.</p>`;
+          return;
+        }
+
+        prospectCardsEl.innerHTML = prospects.map((p) => {
+          const isReached = p.outreach_status === 'reached_out';
+          const statusText = isReached ? 'Reached Out To' : 'Not Reached Out To';
+          const statusClass = isReached ? 'reached' : 'not-reached';
+          return `
+            <article class="flowbite-like-card">
+              <div class="status-pill ${statusClass}">${statusText}</div>
+              <h4 class="prospect-title">${escapeHtml(p.person_name || p.person_id || 'Unknown')}</h4>
+              <p class="prospect-company">${escapeHtml(p.company_name || 'Unknown company')}</p>
+              <div class="person-card-meta">
+                <div>Email: ${escapeHtml(p.contact_email || '—')}</div>
+                <div>Channel: ${escapeHtml(p.outreach_channel || '—')}</div>
+                <div>Source: ${escapeHtml(p.outreach_source || '—')}</div>
+              </div>
+              <button class="btn" data-action="reach-out" data-person-id="${escapeHtml(p.person_id || '')}">Reach Out</button>
+            </article>
+          `;
+        }).join('');
+      } catch (e) {
+        prospectCardsEl.innerHTML = `<p class="loading">Failed to load people: ${escapeHtml(e.message)}</p>`;
       }
     }
 
@@ -575,12 +671,26 @@
           viewThread(sdrId, prospectId, prospectName);
         }
       }
+
+      if (action === 'toggle-outreach') {
+        const status = el.getAttribute('data-status') || 'not_reached';
+        outreachFilter = status;
+        document.querySelectorAll('[data-action="toggle-outreach"]').forEach((btn) => {
+          btn.classList.toggle('active', btn.getAttribute('data-status') === status);
+        });
+        loadProspectCards();
+      }
+
+      if (action === 'reach-out') {
+        // Placeholder button per current stage requirements.
+        alert('Reach Out action is coming next.');
+      }
     });
 
     async function loadDashboard() {
       conversationPanelEl.style.display = 'none';
       conversationPanelEl.innerHTML = '';
-      await Promise.all([loadSdrs(), loadCompanyReach()]);
+      await Promise.all([loadSdrs(), loadCompanyReach(), loadProspectCards()]);
     }
 
     apiBaseInput.addEventListener('change', loadDashboard);
