@@ -64,11 +64,10 @@ COMPANY_SUFFIX_PATTERN = re.compile(
 )
 
 
-@app.on_event("startup")
-def startup_event() -> None:
+def _init_neo4j_driver_from_env() -> tuple[bool, Optional[str]]:
     """
-    Initialize Neo4j driver if environment variables are configured.
-    This keeps local dev simple: app still runs even if Neo4j is not set up yet.
+    Initialize Neo4j driver using NEO4J_* environment variables.
+    Returns (success, error_message).
     """
     global driver
 
@@ -77,19 +76,31 @@ def startup_event() -> None:
     password = os.getenv("NEO4J_PASSWORD")
 
     if not (uri and user and password):
-        # Run without Neo4j if not configured yet
-        print("Neo4j not configured (missing NEO4J_* env vars); skipping driver init.")
-        return
+        driver = None
+        return False, "missing NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD"
 
     try:
         candidate_driver = GraphDatabase.driver(uri, auth=(user, password))
         candidate_driver.verify_connectivity()
         driver = candidate_driver
-        print("Neo4j driver initialized.")
+        return True, None
     except Exception as exc:
         driver = None
-        print(f"Neo4j configuration failed: {exc}")
-        print("Check NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD and DNS/network access to Neo4j Aura.")
+        return False, str(exc)
+
+
+@app.on_event("startup")
+def startup_event() -> None:
+    """
+    Initialize Neo4j driver if environment variables are configured.
+    This keeps local dev simple: app still runs even if Neo4j is not set up yet.
+    """
+    ok, reason = _init_neo4j_driver_from_env()
+    if ok:
+        print("Neo4j driver initialized.")
+    else:
+        print(f"Neo4j not initialized at startup: {reason}")
+        print("The API will retry Neo4j initialization on demand for protected endpoints.")
 
 
 @app.on_event("shutdown")
@@ -935,11 +946,16 @@ async def ingest_conversation(payload: dict):
 
 def _require_driver():
     if driver is None:
+        ok, reason = _init_neo4j_driver_from_env()
+        if ok:
+            print("Neo4j driver initialized on-demand.")
+            return
         raise HTTPException(
             status_code=503,
             detail=(
                 "Neo4j driver not initialized. "
-                "Verify NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD and that the Neo4j host resolves from this machine."
+                "Verify NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD and that the Neo4j host resolves from this machine. "
+                f"Last init error: {reason or 'unknown error'}"
             ),
         )
 

@@ -5,6 +5,12 @@ document.addEventListener('DOMContentLoaded', function() {
   const DEFAULT_SDR_ID = 'sdr1';
   const DEFAULT_SDR_NAME = 'SDR1';
   const SEARCH_DEBOUNCE_MS = 250;
+  const QUICK_DEFAULT_TEMPLATE = 'Hi {{name}},\n\nI wanted to reach out with a quick idea that could be helpful for your team. Open to a short 10-minute chat this week?';
+  const QUICK_TEMPLATES = {
+    short_intro: 'Hi {{name}},\n\nI came across your profile and wanted to connect. If helpful, I can share how teams like yours are improving outreach conversion with less manual work.',
+    value_first: 'Hi {{name}},\n\nWe help teams turn outreach and conversation data into clear next actions. If useful, I can send a quick summary tailored to your company.',
+    quick_call: 'Hi {{name}},\n\nWould you be open to a quick 10-minute call this week to see if this could support your workflow?'
+  };
 
   const apiBaseInput = document.getElementById('apiBase');
   const sdrIdInput = document.getElementById('sdrId');
@@ -29,8 +35,34 @@ document.addEventListener('DOMContentLoaded', function() {
   const directionSelect = document.getElementById('direction');
   const messageInput = document.getElementById('message');
   const saveBtn = document.getElementById('saveManualBtn');
+  const refreshProspectsBtn = document.getElementById('refreshProspectsBtn');
+  const quickStatus = document.getElementById('quickStatus');
+  const quickEntityType = document.getElementById('quickEntityType');
+  const quickTargetSelect = document.getElementById('quickTargetSelect');
+  const copyTargetBtn = document.getElementById('copyTargetBtn');
+  const applyTargetBtn = document.getElementById('applyTargetBtn');
+  const quickTemplatePreset = document.getElementById('quickTemplatePreset');
+  const quickTemplateInput = document.getElementById('quickTemplateInput');
+  const quickMessageOutput = document.getElementById('quickMessageOutput');
+  const copyMessageBtn = document.getElementById('copyMessageBtn');
+  const useMessageBtn = document.getElementById('useMessageBtn');
+  const hasQuickUi = [
+    refreshProspectsBtn,
+    quickStatus,
+    quickEntityType,
+    quickTargetSelect,
+    copyTargetBtn,
+    applyTargetBtn,
+    quickTemplatePreset,
+    quickTemplateInput,
+    quickMessageOutput,
+    copyMessageBtn,
+    useMessageBtn
+  ].every(Boolean);
   let selectedCompany = null;
   let searchTimer = null;
+  let unreachedProspects = [];
+  let quickTargets = [];
 
   const formFields = {
     apiBase: apiBaseInput,
@@ -73,8 +105,19 @@ document.addEventListener('DOMContentLoaded', function() {
       renderSelectedCompany();
     }
 
+    if (hasQuickUi) {
+      quickEntityType.value = draft.quickEntityType || 'person';
+      quickTemplatePreset.value = draft.quickTemplatePreset || 'custom';
+      quickTemplateInput.value = draft.quickTemplateInput || QUICK_DEFAULT_TEMPLATE;
+    }
+
     updateOutreachChannel();
     updateSettingsStatus();
+    if (hasQuickUi) {
+      renderQuickTargets();
+      restoreQuickTargetSelection(draft.quickTargetValue || '');
+      updateQuickMessagePreview();
+    }
   });
 
   // Try to prefill the LinkedIn URL from the active tab
@@ -151,6 +194,12 @@ document.addEventListener('DOMContentLoaded', function() {
       draft.companyWebsite = selectedCompany.website || '';
       draft.companyAssetClasses = selectedCompany.asset_classes || [];
     }
+    if (hasQuickUi) {
+      draft.quickEntityType = quickEntityType.value;
+      draft.quickTemplatePreset = quickTemplatePreset.value;
+      draft.quickTemplateInput = quickTemplateInput.value;
+      draft.quickTargetValue = quickTargetSelect.value;
+    }
     chrome.storage.local.set({ crmhelperDraft: draft });
   };
 
@@ -185,6 +234,103 @@ document.addEventListener('DOMContentLoaded', function() {
     }, SEARCH_DEBOUNCE_MS);
   });
 
+  if (hasQuickUi) {
+    refreshProspectsBtn.addEventListener('click', () => {
+      refreshUnreachedProspects();
+    });
+
+    quickEntityType.addEventListener('change', () => {
+      renderQuickTargets();
+      updateQuickMessagePreview();
+      saveDraft();
+    });
+
+    quickTargetSelect.addEventListener('change', () => {
+      updateQuickMessagePreview();
+      saveDraft();
+    });
+
+    quickTemplatePreset.addEventListener('change', () => {
+      const presetValue = quickTemplatePreset.value;
+      if (presetValue !== 'custom' && QUICK_TEMPLATES[presetValue]) {
+        quickTemplateInput.value = QUICK_TEMPLATES[presetValue];
+      }
+      updateQuickMessagePreview();
+      saveDraft();
+    });
+
+    quickTemplateInput.addEventListener('input', () => {
+      quickTemplatePreset.value = 'custom';
+      updateQuickMessagePreview();
+      saveDraft();
+    });
+
+    copyTargetBtn.addEventListener('click', async () => {
+      const target = selectedQuickTarget();
+      if (!target) {
+        quickStatus.textContent = 'Select a target first.';
+        return;
+      }
+      const textToCopy = quickEntityType.value === 'company' ? target.company_name : target.person_name;
+      if (!textToCopy) {
+        quickStatus.textContent = 'No name available for this target.';
+        return;
+      }
+      const ok = await copyToClipboard(textToCopy);
+      quickStatus.textContent = ok
+        ? `Copied ${quickEntityType.value === 'company' ? 'company' : 'person'} name.`
+        : 'Clipboard copy failed. Please copy manually from the dropdown.';
+    });
+
+    applyTargetBtn.addEventListener('click', () => {
+      const target = selectedQuickTarget();
+      if (!target) {
+        quickStatus.textContent = 'Select a target first.';
+        return;
+      }
+      if (quickEntityType.value === 'company') {
+        companyInput.value = target.company_name || '';
+        clearSelectedCompany();
+        companyStatus.textContent = 'Company filled from unreached list.';
+      } else {
+        nameInput.value = target.person_name || '';
+        if (target.company_name) {
+          companyInput.value = target.company_name;
+          clearSelectedCompany();
+        }
+        if (target.contact_email) {
+          emailInput.value = target.contact_email;
+        }
+      }
+      updateQuickMessagePreview();
+      saveDraft();
+      quickStatus.textContent = 'Profile form updated from selected target.';
+    });
+
+    copyMessageBtn.addEventListener('click', async () => {
+      const message = quickMessageOutput.value.trim();
+      if (!message) {
+        quickStatus.textContent = 'No generated message to copy.';
+        return;
+      }
+      const ok = await copyToClipboard(message);
+      quickStatus.textContent = ok
+        ? 'Personalized message copied to clipboard.'
+        : 'Clipboard copy failed. Please copy from the message box.';
+    });
+
+    useMessageBtn.addEventListener('click', () => {
+      const message = quickMessageOutput.value.trim();
+      if (!message) {
+        quickStatus.textContent = 'No generated message to use.';
+        return;
+      }
+      messageInput.value = message;
+      saveDraft();
+      quickStatus.textContent = 'Main message field updated.';
+    });
+  }
+
   function loadCaptured() {
     chrome.runtime.sendMessage({ type: 'get_captured_requests' }, (response) => {
       const requestsDiv = document.getElementById('requests');
@@ -210,6 +356,9 @@ document.addEventListener('DOMContentLoaded', function() {
   }
 
   loadCaptured();
+  if (hasQuickUi) {
+    refreshUnreachedProspects();
+  }
 
   function slugFromUrl(url) {
     try {
@@ -260,6 +409,173 @@ document.addEventListener('DOMContentLoaded', function() {
 
   function updateSettingsStatus() {
     settingsStatus.textContent = `Backend: ${apiBase()} | SDR: ${currentSdrName()} (${currentSdrId()})`;
+  }
+
+  function normalizeDisplayName(value) {
+    return String(value || '').trim();
+  }
+
+  function selectedQuickTarget() {
+    if (!quickTargetSelect.value) {
+      return null;
+    }
+    const idx = Number(quickTargetSelect.value);
+    if (!Number.isInteger(idx) || idx < 0 || idx >= quickTargets.length) {
+      return null;
+    }
+    return quickTargets[idx];
+  }
+
+  function renderQuickTargets() {
+    const mode = quickEntityType.value;
+    const targetMap = new Map();
+
+    if (mode === 'company') {
+      unreachedProspects.forEach((row) => {
+        const companyName = normalizeDisplayName(row.company_name);
+        if (!companyName) {
+          return;
+        }
+        const key = companyName.toLowerCase();
+        if (!targetMap.has(key)) {
+          targetMap.set(key, {
+            company_name: companyName,
+            person_name: row.person_name || '',
+            contact_email: row.contact_email || ''
+          });
+        }
+      });
+      quickTargets = Array.from(targetMap.values()).sort((a, b) => a.company_name.localeCompare(b.company_name));
+    } else {
+      unreachedProspects.forEach((row) => {
+        const personName = normalizeDisplayName(row.person_name);
+        if (!personName) {
+          return;
+        }
+        const key = `${personName.toLowerCase()}|${String(row.company_name || '').toLowerCase()}`;
+        if (!targetMap.has(key)) {
+          targetMap.set(key, {
+            person_name: personName,
+            company_name: row.company_name || '',
+            contact_email: row.contact_email || ''
+          });
+        }
+      });
+      quickTargets = Array.from(targetMap.values()).sort((a, b) => a.person_name.localeCompare(b.person_name));
+    }
+
+    quickTargetSelect.innerHTML = '';
+    if (quickTargets.length === 0) {
+      const emptyOption = document.createElement('option');
+      emptyOption.value = '';
+      emptyOption.textContent = mode === 'company'
+        ? 'No unreached company names found'
+        : 'No unreached person names found';
+      quickTargetSelect.appendChild(emptyOption);
+      updateQuickMessagePreview();
+      return;
+    }
+
+    quickTargets.forEach((target, idx) => {
+      const option = document.createElement('option');
+      option.value = String(idx);
+      if (mode === 'company') {
+        option.textContent = target.company_name;
+      } else {
+        option.textContent = target.company_name
+          ? `${target.person_name} (${target.company_name})`
+          : target.person_name;
+      }
+      quickTargetSelect.appendChild(option);
+    });
+
+    quickTargetSelect.selectedIndex = 0;
+    updateQuickMessagePreview();
+  }
+
+  function restoreQuickTargetSelection(previousValue) {
+    if (!previousValue || quickTargets.length === 0) {
+      return;
+    }
+    const candidate = Number(previousValue);
+    if (Number.isInteger(candidate) && candidate >= 0 && candidate < quickTargets.length) {
+      quickTargetSelect.value = String(candidate);
+    }
+  }
+
+  function personalizeTemplate(template, name) {
+    const normalizedTemplate = template && template.trim() ? template : QUICK_DEFAULT_TEMPLATE;
+    const displayName = normalizeDisplayName(name) || 'there';
+    return normalizedTemplate
+      .replace(/\{\{\s*name\s*\}\}/gi, displayName)
+      .replace(/\{name\}/gi, displayName);
+  }
+
+  function updateQuickMessagePreview() {
+    const target = selectedQuickTarget();
+    const nameForMessage = target
+      ? (quickEntityType.value === 'company' ? target.company_name : target.person_name)
+      : '';
+    quickMessageOutput.value = personalizeTemplate(quickTemplateInput.value, nameForMessage);
+  }
+
+  async function copyToClipboard(value) {
+    const text = String(value || '');
+    if (!text) {
+      return false;
+    }
+
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (error) {
+      const fallback = document.createElement('textarea');
+      fallback.value = text;
+      fallback.style.position = 'fixed';
+      fallback.style.opacity = '0';
+      document.body.appendChild(fallback);
+      fallback.focus();
+      fallback.select();
+      let success = false;
+      try {
+        success = document.execCommand('copy');
+      } catch (copyError) {
+        success = false;
+      }
+      document.body.removeChild(fallback);
+      return success;
+    }
+  }
+
+  async function refreshUnreachedProspects() {
+    try {
+      quickStatus.textContent = 'Loading unreached prospects...';
+      const response = await fetch(`${apiBase()}/graph/prospects/unreached?limit=500`);
+      if (!response.ok) {
+        let details = await response.text();
+        try {
+          const parsed = JSON.parse(details);
+          if (parsed && parsed.detail) {
+            details = parsed.detail;
+          }
+        } catch (parseError) {
+          // Keep original text when response is not JSON.
+        }
+        throw new Error(`load failed (${response.status}): ${details}`);
+      }
+      const payload = await response.json();
+      unreachedProspects = Array.isArray(payload.prospects) ? payload.prospects : [];
+      renderQuickTargets();
+      quickStatus.textContent = unreachedProspects.length
+        ? `Loaded ${unreachedProspects.length} unreached prospects.`
+        : 'No unreached prospects found.';
+      saveDraft();
+    } catch (error) {
+      unreachedProspects = [];
+      renderQuickTargets();
+      quickStatus.textContent = `Could not load unreached prospects. ${error.message || 'Check backend URL and API health.'}`;
+      console.warn('Unreached prospects load failed', error);
+    }
   }
 
   function escapeHtml(value) {

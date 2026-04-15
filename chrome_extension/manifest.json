@@ -3,7 +3,7 @@
   "name": "CRM Helper Extension",
   "version": "1.0",
   "description": "Capture LinkedIn profile/message data or via PDF upload fallback.",
-  "permissions": ["activeTab", "storage", "scripting"],
+  "permissions": ["activeTab", "storage", "scripting", "clipboardWrite"],
   "host_permissions": [
     "https://www.linkedin.com/*",
     "https://linkedin.com/*",

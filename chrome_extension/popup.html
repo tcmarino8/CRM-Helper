@@ -31,6 +31,10 @@
     .search-result-name { font-weight: bold; }
     .search-result-meta { font-size: 0.85em; color: #555; margin-top: 2px; }
     .selected-company { background: #eef6ff; border: 1px solid #b9d7ff; border-radius: 5px; padding: 8px; margin-top: 6px; }
+    .inline-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .helper-note { font-size: 0.85em; color: #444; margin: 4px 0; }
+    .small-label { font-size: 0.85em; color: #333; margin-top: 6px; }
+    .mono-output { height: 88px; font-family: Consolas, monospace; }
   </style>
 </head>
 <body>
@@ -79,6 +83,40 @@
     <div class="section-title">Message</div>
     <textarea id="message" placeholder="Paste the message here..."></textarea>
     <button id="saveManualBtn">Save entry</button>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Outreach Quick Copy</div>
+    <div class="helper-note">Load unreached prospects, choose a name or company, then copy the search term and personalized message.</div>
+    <button id="refreshProspectsBtn">Load Unreached Prospects</button>
+    <div id="quickStatus" class="status">Ready to load unreached prospects.</div>
+
+    <div class="small-label">Copy target</div>
+    <select id="quickEntityType">
+      <option value="person">Person name</option>
+      <option value="company">Company name</option>
+    </select>
+    <select id="quickTargetSelect"></select>
+    <div class="inline-actions">
+      <button id="copyTargetBtn">Copy Name</button>
+      <button id="applyTargetBtn">Use In Profile Form</button>
+    </div>
+
+    <div class="small-label">Key message presets</div>
+    <select id="quickTemplatePreset">
+      <option value="custom">Custom template</option>
+      <option value="short_intro">Short intro</option>
+      <option value="value_first">Value first</option>
+      <option value="quick_call">Quick call ask</option>
+    </select>
+    <textarea id="quickTemplateInput" placeholder="Use {{name}} where the selected name should go."></textarea>
+
+    <div class="small-label">Personalized message preview</div>
+    <textarea id="quickMessageOutput" class="mono-output"></textarea>
+    <div class="inline-actions">
+      <button id="copyMessageBtn">Copy Message</button>
+      <button id="useMessageBtn">Use As Main Message</button>
+    </div>
   </div>
 
   <div id="apiStatus" class="status"></div>
